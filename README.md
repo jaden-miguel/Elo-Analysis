@@ -10,13 +10,14 @@ HTML dashboard that forecasts which team will win the current season's title.
 
 - Live match data from [openfootball](https://github.com/openfootball/football.json) (2022-23 through the current season)
 - Dixon-Coles time-weighted Poisson model — the same family of models used by professional football analytics teams
-- Separate attack and defensive strength ratings for every club
-- Exponential time decay so recent results count more than older ones
-- Low-score correction (rho) fixes the systematic under-prediction of 0-0 and 1-0 draws
-- Current-season form index (last 6 matches) shifts expected goal rates up or down
-- 10,000 Monte Carlo simulations of remaining fixtures to produce title-win probabilities
+- **Model v3:** separate **home and away** attack/defence parameters per club (four ratings each)
+- Time decay plus **2× weight** on the current season so live form dominates
+- Goals-based form (last 8 matches, exponentially weighted) adjusts expected goals
+- **Head-to-head** adjustment from the last six direct meetings (damped)
+- **50,000** vectorised Monte Carlo simulations (title, top 4, relegation)
+- Low-score Dixon-Coles **rho** correction on analytical match markets
 - Elo rating tracker across all seasons for trend visualisation
-- Self-contained HTML dashboard: probability bars with club badges, form badges (W/D/L), current standings, and an interactive Elo trajectory chart
+- HTML dashboard: title race, **season markets** (fair odds), **best bets** ranking, upcoming fixture breakdown (1X2, Over 2.5, BTTS), standings with form badges
 - No paid API key required
 
 ---
@@ -73,8 +74,8 @@ python src/predict_dashboard.py
 ```
 
 This will:
-1. Fit the Dixon-Coles model to all completed matches
-2. Run 10,000 Monte Carlo simulations of remaining fixtures
+1. Fit the Dixon-Coles v3 model (home/away split) to all completed matches
+2. Run 50,000 Monte Carlo simulations of remaining fixtures
 3. Generate `data/prediction_dashboard.html`
 4. Open the dashboard automatically in your default browser
 
@@ -88,37 +89,45 @@ Standard Elo tracks only win/draw/loss. The Dixon-Coles model instead models
 the number of goals each team scores, which contains significantly more
 information.
 
-Every team has two fitted parameters:
+Each team has **four** fitted log-strength parameters:
 
 | Parameter | Meaning |
 |-----------|---------|
-| `attack[team]` | Log attacking strength (positive = more goals scored than average) |
-| `defense[team]` | Log defensive quality (positive = fewer goals conceded than average) |
+| `atk_home[team]` | Attacking strength when playing at home |
+| `atk_away[team]` | Attacking strength when playing away |
+| `def_home[team]` | Defensive quality when hosting |
+| `def_away[team]` | Defensive quality when travelling |
 
-Global parameters: `home_adv` (home-field advantage) and `rho` (low-score
-correlation correction).
+Expected goals for a fixture:
+
+- Home: `exp(home_adv + atk_home[home] - def_away[away])`
+- Away: `exp(atk_away[away] - def_home[home])`
+
+Global parameters: `home_adv` and Dixon-Coles `rho` (low-score correction on
+analytical markets; simulations use fast vectorised Poisson draws).
 
 ### Time weighting
 
-Each historical match is weighted by `exp(-0.003 * days_ago)`, which gives
-roughly half-weight to matches played more than 8 months ago. This ensures
-the model reflects current team quality rather than being dominated by old data.
+Each match is weighted by `exp(-0.002 * days_ago)` times a **2× multiplier**
+if the row belongs to the most recent season in the dataset. Recent and
+current-season data therefore dominate older seasons.
 
 ### Form adjustment
 
-The model computes each team's points-per-game rate over their last 6 matches
-in the current season. Teams in good form have their expected goals shifted up
-by up to 20%; teams on a poor run are shifted down by the same amount.
+Over the last **8** games in the current season, goals scored and conceded are
+averaged with exponential intra-window weighting (newest games count most).
+These ratios feed multipliers on attack and defence (damped with `FORM_POWER`).
+
+### Head-to-head
+
+The last six meetings between the two clubs adjust expected goals by up to 10%.
 
 ### Monte Carlo simulation
 
-For each of 10,000 simulations, every remaining fixture is resolved by:
-1. Computing expected goals for home and away using fitted parameters and form
-2. Sampling actual goals from a Poisson distribution
-3. Applying the Dixon-Coles low-score correction for 0-0, 0-1, 1-0, 1-1 outcomes
-4. Accumulating points across all teams
-
-The fraction of simulations in which each team finishes top is their title-win probability.
+**50,000** parallel simulations: for every remaining fixture, goals are drawn
+from Poisson distributions at the adjusted xG rates; points are accumulated and
+teams ranked. Title, top-four, and relegation probabilities are empirical
+frequencies across simulations.
 
 ---
 
