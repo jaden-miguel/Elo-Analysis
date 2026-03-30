@@ -652,3 +652,92 @@ def run_monte_carlo(
 
     return (win_probs, top4_probs, rel_probs, cur_points, cur_gd, elo_ratings, teams_list,
             atk_home, atk_away, def_home, def_away, home_adv, rho, form_atk, form_def)
+
+
+# ---------------------------------------------------------------------------
+# Matchday standings (for race animation)
+# ---------------------------------------------------------------------------
+
+def compute_matchday_standings(completed: pd.DataFrame, season: str) -> list:
+    """
+    Compute cumulative points after each matchweek for the race animation.
+    Groups dates within 4 days into the same matchday.
+    """
+    df = (completed[completed["season"] == season]
+          .sort_values("date").copy())
+    if df.empty:
+        return []
+
+    dates = sorted(df["date"].unique())
+    groups, current_group = [], [dates[0]]
+    for d in dates[1:]:
+        prev = pd.Timestamp(current_group[-1])
+        cur  = pd.Timestamp(d)
+        if (cur - prev).days <= 4:
+            current_group.append(d)
+        else:
+            groups.append(current_group)
+            current_group = [d]
+    groups.append(current_group)
+
+    teams = set(df["home_team"]) | set(df["away_team"])
+    points = {t: 0 for t in teams}
+    snapshots = []
+
+    for mw, date_group in enumerate(groups, 1):
+        chunk = df[df["date"].isin(date_group)]
+        for _, row in chunk.iterrows():
+            h, a = row["home_team"], row["away_team"]
+            hg, ag = int(row["home_goals"]), int(row["away_goals"])
+            if hg > ag:
+                points[h] += 3
+            elif hg == ag:
+                points[h] += 1; points[a] += 1
+            else:
+                points[a] += 3
+        snapshots.append({
+            "matchday": mw,
+            "date": str(date_group[-1]),
+            "standings": dict(points),
+        })
+
+    return snapshots
+
+
+# ---------------------------------------------------------------------------
+# Goal predictions
+# ---------------------------------------------------------------------------
+
+def predict_remaining_goals(atk_home, atk_away, def_home, def_away,
+                            home_adv, upcoming, target_season,
+                            form_atk, form_def) -> dict:
+    """
+    Estimate total remaining goals per team from the v3 Dixon-Coles parameters.
+    """
+    rem = upcoming[upcoming["season"] == target_season] if not upcoming.empty else pd.DataFrame()
+    if rem.empty:
+        return {}
+
+    team_xg: dict[str, float] = {}
+
+    DEFAULT_AH = float(np.mean(list(atk_home.values()))) if atk_home else 0.0
+    DEFAULT_AA = float(np.mean(list(atk_away.values()))) if atk_away else 0.0
+    DEFAULT_DH = float(np.mean(list(def_home.values()))) if def_home else 0.0
+    DEFAULT_DA = float(np.mean(list(def_away.values()))) if def_away else 0.0
+
+    for _, row in rem.iterrows():
+        h, a = row["home_team"], row["away_team"]
+        lam = math.exp(home_adv
+                       + atk_home.get(h, DEFAULT_AH)
+                       - def_away.get(a, DEFAULT_DA))
+        mu  = math.exp(atk_away.get(a, DEFAULT_AA)
+                       - def_home.get(h, DEFAULT_DH))
+        fa_h = form_atk.get(h, 1.0); fd_a = form_def.get(a, 1.0)
+        fa_a = form_atk.get(a, 1.0); fd_h = form_def.get(h, 1.0)
+        lam *= (fa_h ** 0.28) * (fd_a ** 0.28)
+        mu  *= (fa_a ** 0.28) * (fd_h ** 0.28)
+
+        team_xg[h] = team_xg.get(h, 0) + max(lam, 0.05)
+        team_xg[a] = team_xg.get(a, 0) + max(mu, 0.05)
+
+    return team_xg
